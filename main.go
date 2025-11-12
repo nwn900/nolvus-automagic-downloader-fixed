@@ -11,26 +11,32 @@ import (
 
 func main() {
 	// Create a new allocator context for managing Chrome instances
-	allocatorContext, cancel := chromedp.NewRemoteAllocator(context.Background(), "ws://localhost:8088")
-	defer cancel()
+	allocatorContext, allocCancel := chromedp.NewRemoteAllocator(context.Background(), "ws://localhost:8088")
+	defer allocCancel()
 
 	// Build context options (currently empty, but can be used for configuration)
 	var opts []chromedp.ContextOption
 
 	// Create a new Chrome instance using the allocator and options
-	ctx, cancel := chromedp.NewContext(
+	ctx, ctxCancel := chromedp.NewContext(
 		allocatorContext,
 		opts...,
 	)
-	defer cancel()
+	defer ctxCancel()
 
 	// "processBrowser" processes the browser's targets
 	processBrowser := func() {
 		// Retrieve the list of targets (tabs/windows) in the Chrome instance
 		targets, err := chromedp.Targets(ctx)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("Error getting targets: %v", err)
 			return
+		}
+
+		// Log all target titles for debugging
+		log.Printf("Found %d targets:", len(targets))
+		for i, t := range targets {
+			log.Printf("  [%d] %s", i, t.Title)
 		}
 
 		// Flag to check if the target is found
@@ -38,21 +44,23 @@ func main() {
 
 		// Iterate through the targets to find the desired one
 		for _, t := range targets {
-			if strings.Contains(t.Title, "Skyrim Special Edition Nexus") {
+			// More flexible search - just look for "Skyrim" and "Nexus"
+			titleLower := strings.ToLower(t.Title)
+			if strings.Contains(titleLower, "skyrim") && strings.Contains(titleLower, "nexus") {
 				found = true
 				log.Printf("Target: %s", t.Title)
-				ctx, cancel := chromedp.NewContext(ctx, chromedp.WithTargetID(t.TargetID))
-				defer cancel()
-
-				// Create a timeout
-				ctx, cancel = context.WithTimeout(ctx, 1*time.Second)
-				defer cancel()
-
-				// Set a timeout for ad check
-				var adVisible bool
-
+				
+				// Create a NEW context specifically for this target
+				// Use the ALLOCATOR context as parent, not ctx
+				targetCtx, targetCancel := chromedp.NewContext(
+					allocatorContext, 
+					chromedp.WithTargetID(t.TargetID),
+				)
+				// We'll clean this up at the end of processing this target
+				
 				// Check if an ad is visible
-				err := chromedp.Run(ctx,
+				var adVisible bool
+				err := chromedp.Run(targetCtx,
 					chromedp.Evaluate(`!!document.querySelector('input.close-btn[type="checkbox"]')`, &adVisible),
 				)
 
@@ -61,30 +69,85 @@ func main() {
 					log.Printf("Error checking for ad popup: %s", err.Error())
 				}
 
-				// If an ad is visible, set a timeout for closing it
+				// If an ad is visible, close it
 				if adVisible {
-					ctxCloseAd, cancelCloseAd := context.WithTimeout(ctx, 10*time.Second)
-					defer cancelCloseAd()
-					err = chromedp.Run(ctxCloseAd,
-						chromedp.WaitVisible(`input.close-btn[type="checkbox"]`), // Wait until the ad's close button is visible
-						chromedp.Click(`input.close-btn[type="checkbox"]`),       // Click the ad's close button
+					err = chromedp.Run(targetCtx,
+						chromedp.WaitVisible(`input.close-btn[type="checkbox"]`, chromedp.ByQuery),
+						chromedp.Click(`input.close-btn[type="checkbox"]`, chromedp.ByQuery),
 					)
+					
 					if err != nil {
-						log.Printf("Could not close ad popup: %s", err.Error()) // Log error without exiting
+						log.Printf("Could not close ad popup: %s", err.Error())
+					} else {
+						log.Println("Closed ad popup successfully")
+						time.Sleep(500 * time.Millisecond) // Brief pause after closing ad
 					}
 				}
 
-				// Attempt to click the download button
-				err = chromedp.Run(ctx,
-					chromedp.WaitVisible(`button[id="slowDownloadButton"]`),
-					chromedp.Click(`button[id="slowDownloadButton"]`),
+				// First, let's debug what's in the shadow root
+				var debugInfo string
+				err = chromedp.Run(targetCtx,
+					chromedp.EvaluateAsDevTools(`
+						(() => {
+							const host = document.querySelector("mod-file-download");
+							if (!host) return "Host element 'mod-file-download' not found";
+							if (!host.shadowRoot) return "ShadowRoot not found on host";
+							
+							// Try to find the button with different selectors
+							const btn1 = host.shadowRoot.querySelector("button");
+							const btn2 = host.shadowRoot.querySelector("button span");
+							const btn3 = host.shadowRoot.querySelector("button span span");
+							
+							return JSON.stringify({
+								hasButton: !!btn1,
+								hasButtonSpan: !!btn2,
+								hasButtonSpanSpan: !!btn3,
+								buttonHTML: btn1 ? btn1.outerHTML.substring(0, 200) : "none",
+								allButtons: host.shadowRoot.querySelectorAll("button").length
+							});
+						})()
+					`, &debugInfo),
 				)
-
-				// Log error without exiting
+				
 				if err != nil {
-					log.Printf("Could not fulfill new target with error %s", err.Error())
+					log.Printf("Error debugging shadow root: %v", err)
+				} else {
+					log.Printf("Shadow root debug info: %s", debugInfo)
 				}
-				cancel()
+
+				// Now try clicking with multiple selector strategies
+				var clicked bool
+				err = chromedp.Run(targetCtx,
+					chromedp.EvaluateAsDevTools(`
+						(() => {
+							const host = document.querySelector("mod-file-download");
+							if (!host || !host.shadowRoot) return false;
+							
+							// Try different selectors
+							let btn = host.shadowRoot.querySelector("button span span");
+							if (!btn) btn = host.shadowRoot.querySelector("button span");
+							if (!btn) btn = host.shadowRoot.querySelector("button");
+							
+							if (!btn) return false;
+							
+							btn.click();
+							return true;
+						})()
+					`, &clicked),
+				)
+				
+				if err != nil {
+					log.Printf("Error clicking download button: %v", err)
+				} else if clicked {
+					log.Println("Clicked download button successfully!")
+					time.Sleep(2 * time.Second)
+				} else {
+					log.Println("Download button not found inside shadow root")
+				}
+
+				// Clean up the target context after ALL operations are done
+				targetCancel()
+				break // Exit the loop once we've processed the target
 			}
 		}
 
@@ -94,52 +157,9 @@ func main() {
 		}
 	}
 
-	// Log if no target was found
+	// Continuously process the browser
 	for {
 		processBrowser()
 		time.Sleep(5 * time.Second)
 	}
-
-	// targets, err := chromedp.Targets(ctx)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	//
-	// fmt.Println("Targets: ", targets)
-	//
-	// var currentTarget *target.Info
-	// for _, t := range targets {
-	// 	if strings.Contains(t.Title, "Skyrim Special Edition Nexus") {
-	// 		currentTarget = t
-	// 		break
-	// 	}
-	// }
-	//
-	// if currentTarget == nil {
-	// 	log.Fatal("currentTarget has not been found")
-	// }
-	//
-	// // build context options
-	// opts = append(opts, chromedp.WithTargetID(currentTarget.TargetID))
-	//
-	// // create chrome instance
-	// ctx, cancel = chromedp.NewContext(
-	// 	allocatorContext,
-	// 	opts...,
-	// )
-	//
-	// defer cancel()
-	//
-	// // create a timeout
-	// ctx, cancel = context.WithTimeout(ctx, 1*time.Second)
-	// defer cancel()
-	//
-	// err = chromedp.Run(ctx,
-	// 	chromedp.WaitVisible(`button[id="slowDownloadButton"]`),
-	// 	chromedp.Click(`button[id="slowDownloadButton"]`),
-	// )
-	// if err != nil {
-	// 	panic(err)
-	// }
-
 }
