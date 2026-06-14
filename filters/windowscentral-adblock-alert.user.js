@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Windows Central - stop anti-adblock prompt path
-// @description  Stop the Windows Central "Please allow ads" prompt path by throwing out of it, then preserve reading position as a fallback.
+// @name         Windows Central - suppress anti-adblock prompt and restore position
+// @description  Suppress the Windows Central "Please allow ads" prompt and preserve article reading position.
 // @match        https://windowscentral.com/*
 // @match        https://www.windowscentral.com/*
 // @run-at       document-start
@@ -11,34 +11,11 @@
   'use strict';
 
   const promptPattern = /please allow ads on this site|click ok to learn more/i;
-  const pageKey = `wc-pos:v5:${location.pathname}${location.search}`;
-  const SENTINEL = '__wc_blocked_ad_prompt__';
+  const pageKey = `wc-pos:stable-v1:${location.pathname}${location.search}`;
   const now = () => Date.now();
 
-  const makeSentinelError = () => {
-    const err = new Error(SENTINEL);
-    err.name = SENTINEL;
-    return err;
-  };
-
-  const isSentinel = value => {
-    const text = String(value?.message || value?.reason?.message || value?.error?.message || value || '');
-    return text.includes(SENTINEL);
-  };
-
-  window.addEventListener('error', event => {
-    if (isSentinel(event)) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }
-  }, true);
-
-  window.addEventListener('unhandledrejection', event => {
-    if (isSentinel(event)) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }
-  }, true);
+  const getY = () => window.scrollY || document.documentElement.scrollTop || document.body?.scrollTop || 0;
+  const maxScrollableY = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
 
   const readSaved = () => {
     try {
@@ -58,13 +35,12 @@
     try { sessionStorage.setItem(pageKey, value); } catch (_) {}
   };
 
-  const getY = () => window.scrollY || document.documentElement.scrollTop || document.body?.scrollTop || 0;
-  const maxScrollableY = () => Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-
   let lastGoodY = Math.max(readSaved(), getY());
-  let guardUntil = now() + 45000;
+  let guardUntil = now() + 30000;
   let restoring = false;
   let userScrollUntil = 0;
+
+  try { history.scrollRestoration = 'manual'; } catch (_) {}
 
   const remember = () => {
     if (restoring) return;
@@ -75,86 +51,29 @@
     }
   };
 
-  const extendGuard = ms => {
+  const markSuspicious = () => {
     remember();
-    guardUntil = Math.max(guardUntil, now() + ms);
+    guardUntil = Math.max(guardUntil, now() + 45000);
   };
 
-  const blockPrompt = value => {
-    if (!promptPattern.test(String(value || ''))) return false;
-    extendGuard(60000);
-    throw makeSentinelError();
+  const shouldBlockPrompt = value => {
+    const blocked = promptPattern.test(String(value || ''));
+    if (blocked) markSuspicious();
+    return blocked;
   };
-
-  try { history.scrollRestoration = 'manual'; } catch (_) {}
 
   const originalAlert = window.alert.bind(window);
   const originalConfirm = window.confirm.bind(window);
 
   window.alert = value => {
-    blockPrompt(value);
+    if (shouldBlockPrompt(value)) return undefined;
     return originalAlert(value);
   };
 
   window.confirm = value => {
-    blockPrompt(value);
+    if (shouldBlockPrompt(value)) return false;
     return originalConfirm(value);
   };
-
-  // Also stop prompt-like strings from passing through timer/eval paths.
-  const originalSetTimeout = window.setTimeout.bind(window);
-  const originalSetInterval = window.setInterval.bind(window);
-  const originalEval = window.eval.bind(window);
-  const OriginalFunction = window.Function;
-
-  const suspiciousCode = code => promptPattern.test(String(code || ''));
-
-  const safeHandler = handler => {
-    if (typeof handler === 'string' && suspiciousCode(handler)) {
-      extendGuard(60000);
-      return () => { throw makeSentinelError(); };
-    }
-    if (typeof handler === 'function') {
-      try {
-        if (suspiciousCode(Function.prototype.toString.call(handler))) {
-          extendGuard(60000);
-          return () => { throw makeSentinelError(); };
-        }
-      } catch (_) {}
-    }
-    return handler;
-  };
-
-  window.setTimeout = (handler, delay, ...args) => originalSetTimeout(safeHandler(handler), delay, ...args);
-  window.setInterval = (handler, delay, ...args) => originalSetInterval(safeHandler(handler), delay, ...args);
-  window.eval = code => {
-    if (suspiciousCode(code)) {
-      extendGuard(60000);
-      throw makeSentinelError();
-    }
-    return originalEval(code);
-  };
-
-  try {
-    window.Function = new Proxy(OriginalFunction, {
-      apply(target, thisArg, args) {
-        const body = args.join('\n');
-        if (suspiciousCode(body)) {
-          extendGuard(60000);
-          return function () { throw makeSentinelError(); };
-        }
-        return Reflect.apply(target, thisArg, args);
-      },
-      construct(target, args) {
-        const body = args.join('\n');
-        if (suspiciousCode(body)) {
-          extendGuard(60000);
-          return function () { throw makeSentinelError(); };
-        }
-        return Reflect.construct(target, args);
-      }
-    });
-  } catch (_) {}
 
   const originalScrollTo = window.scrollTo.bind(window);
   const originalScrollBy = window.scrollBy.bind(window);
@@ -170,12 +89,15 @@
     if (restoring) return false;
     if (now() > guardUntil) return false;
     if (now() < userScrollUntil) return false;
+
     const currentY = getY();
     const referenceY = Math.max(lastGoodY, readSaved());
     if (referenceY < 300) return false;
     if (!Number.isFinite(targetY)) return false;
+
     if (targetY < 120) return true;
     if (targetY < referenceY - 350 && targetY < currentY - 250) return true;
+
     return false;
   };
 
@@ -185,16 +107,17 @@
     const y = Math.max(lastGoodY, readSaved());
     if (!canRestore(y)) return false;
     if (getY() >= y - 140) return true;
+
     restoring = true;
     try { originalScrollTo(0, y); } catch (_) {}
-    originalSetTimeout(() => { restoring = false; }, 100);
+    setTimeout(() => { restoring = false; }, 100);
     return true;
   };
 
   window.scrollTo = (...args) => {
     const targetY = targetFromArgs(args);
     if (shouldBlockProgrammaticJump(targetY)) {
-      originalSetTimeout(restore, 0);
+      setTimeout(restore, 0);
       return undefined;
     }
     return originalScrollTo(...args);
@@ -204,7 +127,7 @@
     const deltaY = targetFromArgs(args);
     const targetY = getY() + deltaY;
     if (shouldBlockProgrammaticJump(targetY)) {
-      originalSetTimeout(restore, 0);
+      setTimeout(restore, 0);
       return undefined;
     }
     return originalScrollBy(...args);
@@ -212,7 +135,7 @@
 
   Element.prototype.scrollIntoView = function (...args) {
     if (now() <= guardUntil && now() >= userScrollUntil && Math.max(lastGoodY, readSaved()) >= 300) {
-      originalSetTimeout(restore, 0);
+      setTimeout(restore, 0);
       return undefined;
     }
     return originalScrollIntoView.apply(this, args);
@@ -220,31 +143,11 @@
 
   history.go = delta => {
     if (now() <= guardUntil && Number(delta) === 0) {
-      originalSetTimeout(restore, 0);
+      setTimeout(restore, 0);
       return undefined;
     }
     return originalHistoryGo(delta);
   };
-
-  const patchLocationMethod = name => {
-    try {
-      const original = Location.prototype[name];
-      Object.defineProperty(Location.prototype, name, {
-        configurable: true,
-        value: function (...args) {
-          if (now() <= guardUntil) {
-            originalSetTimeout(restore, 0);
-            return undefined;
-          }
-          return original.apply(this, args);
-        }
-      });
-    } catch (_) {}
-  };
-
-  patchLocationMethod('reload');
-  patchLocationMethod('assign');
-  patchLocationMethod('replace');
 
   const markUserScroll = () => {
     userScrollUntil = now() + 700;
@@ -260,9 +163,18 @@
   window.addEventListener('beforeunload', remember, { passive: true });
   document.addEventListener('visibilitychange', remember, { passive: true });
 
-  originalSetInterval(remember, 250);
+  setInterval(remember, 250);
 
   [0, 25, 50, 100, 200, 350, 500, 750, 1000, 1500, 2200, 3000, 4500, 6500, 9000, 12000, 16000, 22000, 30000].forEach(delay => {
-    originalSetTimeout(restore, delay);
+    setTimeout(restore, delay);
   });
+
+  const keeper = setInterval(() => {
+    if (now() > guardUntil + 1000) {
+      clearInterval(keeper);
+      return;
+    }
+    const referenceY = Math.max(lastGoodY, readSaved());
+    if (referenceY >= 300 && getY() < referenceY - 350 && now() >= userScrollUntil) restore();
+  }, 300);
 })();
