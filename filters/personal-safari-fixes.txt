@@ -1,0 +1,6 @@
+! Title: Personal Safari Fixes
+! Description: Windows Central anti-adblock alert suppression
+! Expires: 1 day
+
+windowscentral.com#%#//scriptlet('set-constant', 'alert', 'noopFunc')
+www.windowscentral.com#%#//scriptlet('set-constant', 'alert', 'noopFunc')
