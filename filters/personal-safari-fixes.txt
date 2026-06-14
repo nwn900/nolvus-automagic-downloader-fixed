@@ -2,5 +2,12 @@
 ! Description: Windows Central anti-adblock alert suppression
 ! Expires: 1 day
 
+! Windows Central alert/confirm suppression
 windowscentral.com#%#//scriptlet('set-constant', 'alert', 'noopFunc')
 www.windowscentral.com#%#//scriptlet('set-constant', 'alert', 'noopFunc')
+windowscentral.com#%#//scriptlet('set-constant', 'confirm', 'noopFunc')
+www.windowscentral.com#%#//scriptlet('set-constant', 'confirm', 'noopFunc')
+
+! Raw JS fallback for wBlock's #%# injection path
+windowscentral.com#%#(() => { const block = v => /please allow ads on this site|click ok to learn more/i.test(String(v || '')); const oldAlert = window.alert.bind(window); const oldConfirm = window.confirm.bind(window); window.alert = v => block(v) ? undefined : oldAlert(v); window.confirm = v => block(v) ? false : oldConfirm(v); })();
+www.windowscentral.com#%#(() => { const block = v => /please allow ads on this site|click ok to learn more/i.test(String(v || '')); const oldAlert = window.alert.bind(window); const oldConfirm = window.confirm.bind(window); window.alert = v => block(v) ? undefined : oldAlert(v); window.confirm = v => block(v) ? false : oldConfirm(v); })();
