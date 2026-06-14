@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Windows Central - suppress anti-adblock prompt/reload
-// @description  Suppress the Windows Central "Please allow ads" prompt, block likely forced reload paths, and preserve reading position as a fallback.
+// @name         Windows Central - stop anti-adblock prompt path
+// @description  Stop the Windows Central "Please allow ads" prompt path by throwing out of it, then preserve reading position as a fallback.
 // @match        https://windowscentral.com/*
 // @match        https://www.windowscentral.com/*
 // @run-at       document-start
@@ -11,10 +11,34 @@
   'use strict';
 
   const promptPattern = /please allow ads on this site|click ok to learn more/i;
-  const suspiciousPattern = /please allow ads|allow ads|adblock|ad blocker|ad-block|fuckadblock|blockadblock/i;
-  const disruptivePattern = /location|reload|assign|replace|href|history\.go|scrollTo|scrollIntoView/i;
-  const pageKey = `wc-pos:v4:${location.pathname}${location.search}`;
+  const pageKey = `wc-pos:v5:${location.pathname}${location.search}`;
+  const SENTINEL = '__wc_blocked_ad_prompt__';
   const now = () => Date.now();
+
+  const makeSentinelError = () => {
+    const err = new Error(SENTINEL);
+    err.name = SENTINEL;
+    return err;
+  };
+
+  const isSentinel = value => {
+    const text = String(value?.message || value?.reason?.message || value?.error?.message || value || '');
+    return text.includes(SENTINEL);
+  };
+
+  window.addEventListener('error', event => {
+    if (isSentinel(event)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
+
+  window.addEventListener('unhandledrejection', event => {
+    if (isSentinel(event)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
 
   const readSaved = () => {
     try {
@@ -56,80 +80,57 @@
     guardUntil = Math.max(guardUntil, now() + ms);
   };
 
-  const looksDisruptive = value => {
-    const s = String(value || '');
-    return suspiciousPattern.test(s) && disruptivePattern.test(s);
-  };
-
   const blockPrompt = value => {
-    const blocked = promptPattern.test(String(value || ''));
-    if (blocked) extendGuard(60000);
-    return blocked;
+    if (!promptPattern.test(String(value || ''))) return false;
+    extendGuard(60000);
+    throw makeSentinelError();
   };
-
-  // Keep the page from fading through a black background if a visual overlay is used.
-  const injectBaseCss = () => {
-    const css = `
-      html, body { background: #fff !important; }
-      html.wc-no-blackout, html.wc-no-blackout body { background: #fff !important; }
-      html.wc-no-blackout * { scroll-behavior: auto !important; }
-    `;
-    const style = document.createElement('style');
-    style.textContent = css;
-    (document.documentElement || document.head || document).appendChild(style);
-    document.documentElement.classList.add('wc-no-blackout');
-  };
-
-  try { injectBaseCss(); } catch (_) {
-    document.addEventListener('DOMContentLoaded', injectBaseCss, { once: true });
-  }
 
   try { history.scrollRestoration = 'manual'; } catch (_) {}
 
-  // Suppress the visible prompt.
   const originalAlert = window.alert.bind(window);
   const originalConfirm = window.confirm.bind(window);
-  window.alert = value => blockPrompt(value) ? undefined : originalAlert(value);
-  window.confirm = value => blockPrompt(value) ? false : originalConfirm(value);
 
-  // Block delayed callbacks that appear to be the anti-adblock punishment path.
+  window.alert = value => {
+    blockPrompt(value);
+    return originalAlert(value);
+  };
+
+  window.confirm = value => {
+    blockPrompt(value);
+    return originalConfirm(value);
+  };
+
+  // Also stop prompt-like strings from passing through timer/eval paths.
   const originalSetTimeout = window.setTimeout.bind(window);
   const originalSetInterval = window.setInterval.bind(window);
-  const originalRAF = window.requestAnimationFrame?.bind(window);
   const originalEval = window.eval.bind(window);
   const OriginalFunction = window.Function;
 
-  const safeTimerHandler = handler => {
-    if (typeof handler === 'string') {
-      if (looksDisruptive(handler)) {
-        extendGuard(60000);
-        return () => undefined;
-      }
-      return handler;
-    }
+  const suspiciousCode = code => promptPattern.test(String(code || ''));
 
+  const safeHandler = handler => {
+    if (typeof handler === 'string' && suspiciousCode(handler)) {
+      extendGuard(60000);
+      return () => { throw makeSentinelError(); };
+    }
     if (typeof handler === 'function') {
-      const source = Function.prototype.toString.call(handler);
-      if (looksDisruptive(source)) {
-        extendGuard(60000);
-        return () => undefined;
-      }
+      try {
+        if (suspiciousCode(Function.prototype.toString.call(handler))) {
+          extendGuard(60000);
+          return () => { throw makeSentinelError(); };
+        }
+      } catch (_) {}
     }
-
     return handler;
   };
 
-  window.setTimeout = (handler, delay, ...args) => originalSetTimeout(safeTimerHandler(handler), delay, ...args);
-  window.setInterval = (handler, delay, ...args) => originalSetInterval(safeTimerHandler(handler), delay, ...args);
-
-  if (originalRAF) {
-    window.requestAnimationFrame = callback => originalRAF(safeTimerHandler(callback));
-  }
-
+  window.setTimeout = (handler, delay, ...args) => originalSetTimeout(safeHandler(handler), delay, ...args);
+  window.setInterval = (handler, delay, ...args) => originalSetInterval(safeHandler(handler), delay, ...args);
   window.eval = code => {
-    if (looksDisruptive(code)) {
+    if (suspiciousCode(code)) {
       extendGuard(60000);
-      return undefined;
+      throw makeSentinelError();
     }
     return originalEval(code);
   };
@@ -138,94 +139,27 @@
     window.Function = new Proxy(OriginalFunction, {
       apply(target, thisArg, args) {
         const body = args.join('\n');
-        if (looksDisruptive(body)) {
+        if (suspiciousCode(body)) {
           extendGuard(60000);
-          return function () {};
+          return function () { throw makeSentinelError(); };
         }
         return Reflect.apply(target, thisArg, args);
       },
       construct(target, args) {
         const body = args.join('\n');
-        if (looksDisruptive(body)) {
+        if (suspiciousCode(body)) {
           extendGuard(60000);
-          return function () {};
+          return function () { throw makeSentinelError(); };
         }
         return Reflect.construct(target, args);
       }
     });
   } catch (_) {}
 
-  // Some anti-adblock code is injected as inline scripts. Neuter those before they run when possible.
-  const originalAppendChild = Node.prototype.appendChild;
-  const originalInsertBefore = Node.prototype.insertBefore;
-
-  const neutralizeScriptNode = node => {
-    try {
-      if (node && String(node.tagName).toLowerCase() === 'script') {
-        const code = node.textContent || '';
-        if (looksDisruptive(code)) {
-          extendGuard(60000);
-          node.textContent = '';
-          node.type = 'javascript/blocked';
-        }
-      }
-    } catch (_) {}
-    return node;
-  };
-
-  Node.prototype.appendChild = function (node) {
-    return originalAppendChild.call(this, neutralizeScriptNode(node));
-  };
-
-  Node.prototype.insertBefore = function (node, ref) {
-    return originalInsertBefore.call(this, neutralizeScriptNode(node), ref);
-  };
-
-  // Hide transient black fixed overlays if the site uses a visual fade instead of a hard reload.
-  const isBlackout = el => {
-    try {
-      if (!(el instanceof HTMLElement)) return false;
-      const cs = getComputedStyle(el);
-      const z = Number(cs.zIndex || 0);
-      const rect = el.getBoundingClientRect();
-      const bg = cs.backgroundColor || '';
-      const coversScreen = rect.width >= window.innerWidth * 0.8 && rect.height >= window.innerHeight * 0.8;
-      const fixedOrSticky = cs.position === 'fixed' || cs.position === 'sticky';
-      const dark = /rgba?\(\s*(0|1|2|3|4|5|6|7|8|9|1\d|2\d|3\d)\s*,\s*(0|1|2|3|4|5|6|7|8|9|1\d|2\d|3\d)\s*,\s*(0|1|2|3|4|5|6|7|8|9|1\d|2\d|3\d)/i.test(bg);
-      return fixedOrSticky && coversScreen && dark && z >= 10;
-    } catch (_) {
-      return false;
-    }
-  };
-
-  const removeBlackouts = root => {
-    if (now() > guardUntil) return;
-    const nodes = [];
-    if (root instanceof HTMLElement) nodes.push(root);
-    try { nodes.push(...root.querySelectorAll?.('*') || []); } catch (_) {}
-    for (const node of nodes) {
-      if (isBlackout(node)) {
-        node.style.setProperty('display', 'none', 'important');
-        node.style.setProperty('opacity', '0', 'important');
-        node.style.setProperty('pointer-events', 'none', 'important');
-      }
-    }
-  };
-
-  try {
-    new MutationObserver(mutations => {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) removeBlackouts(node);
-      }
-    }).observe(document.documentElement, { childList: true, subtree: true });
-  } catch (_) {}
-
   const originalScrollTo = window.scrollTo.bind(window);
   const originalScrollBy = window.scrollBy.bind(window);
   const originalScrollIntoView = Element.prototype.scrollIntoView;
   const originalHistoryGo = history.go.bind(history);
-  const originalPushState = history.pushState.bind(history);
-  const originalReplaceState = history.replaceState.bind(history);
 
   const targetFromArgs = args => {
     if (args.length === 1 && args[0] && typeof args[0] === 'object') return Number(args[0].top ?? getY());
@@ -292,16 +226,6 @@
     return originalHistoryGo(delta);
   };
 
-  history.pushState = function (...args) {
-    remember();
-    return originalPushState(...args);
-  };
-
-  history.replaceState = function (...args) {
-    remember();
-    return originalReplaceState(...args);
-  };
-
   const patchLocationMethod = name => {
     try {
       const original = Location.prototype[name];
@@ -326,9 +250,9 @@
     userScrollUntil = now() + 700;
   };
 
-  window.addEventListener('wheel', markUserScroll, { passive: true, capture: true });
   window.addEventListener('touchstart', markUserScroll, { passive: true, capture: true });
   window.addEventListener('touchmove', markUserScroll, { passive: true, capture: true });
+  window.addEventListener('wheel', markUserScroll, { passive: true, capture: true });
   window.addEventListener('keydown', markUserScroll, { passive: true, capture: true });
 
   window.addEventListener('scroll', remember, { passive: true });
@@ -341,14 +265,4 @@
   [0, 25, 50, 100, 200, 350, 500, 750, 1000, 1500, 2200, 3000, 4500, 6500, 9000, 12000, 16000, 22000, 30000].forEach(delay => {
     originalSetTimeout(restore, delay);
   });
-
-  const keeper = originalSetInterval(() => {
-    if (now() > guardUntil + 1000) {
-      clearInterval(keeper);
-      return;
-    }
-    removeBlackouts(document.documentElement);
-    const referenceY = Math.max(lastGoodY, readSaved());
-    if (referenceY >= 300 && getY() < referenceY - 350 && now() >= userScrollUntil) restore();
-  }, 300);
 })();
