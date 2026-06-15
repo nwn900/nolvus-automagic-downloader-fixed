@@ -1,13 +1,17 @@
 ! Title: Personal Safari Fixes
-! Description: Windows Central anti-adblock alert suppression
+! Description: Windows Central / Future anti-adblock diagnostics and suppression
 ! Expires: 1 day
 
-! Windows Central alert/confirm suppression
+! Candidate Future ad/anti-adblock stack observed in upstream filters for Future-owned sites.
+! Do not block bordeaux on Windows Central; uBlock has a Future-site-specific exception for PC Gamer.
+@@||bordeaux.futurecdn.net/bordeaux.js$script,domain=windowscentral.com
+
+! Block the two Future CDN resources upstream filters classify as ad/nuisance related on Future sites.
+||champagne.futurecdn.net^$script,domain=windowscentral.com
+||freyr.futurecdn.net^$script,domain=windowscentral.com
+
+! Windows Central alert/confirm suppression fallback
 windowscentral.com#%#//scriptlet('set-constant', 'alert', 'noopFunc')
 www.windowscentral.com#%#//scriptlet('set-constant', 'alert', 'noopFunc')
 windowscentral.com#%#//scriptlet('set-constant', 'confirm', 'noopFunc')
 www.windowscentral.com#%#//scriptlet('set-constant', 'confirm', 'noopFunc')
-
-! Raw JS fallback for wBlock's #%# injection path
-windowscentral.com#%#(() => { const block = v => /please allow ads on this site|click ok to learn more/i.test(String(v || '')); const oldAlert = window.alert.bind(window); const oldConfirm = window.confirm.bind(window); window.alert = v => block(v) ? undefined : oldAlert(v); window.confirm = v => block(v) ? false : oldConfirm(v); })();
-www.windowscentral.com#%#(() => { const block = v => /please allow ads on this site|click ok to learn more/i.test(String(v || '')); const oldAlert = window.alert.bind(window); const oldConfirm = window.confirm.bind(window); window.alert = v => block(v) ? undefined : oldAlert(v); window.confirm = v => block(v) ? false : oldConfirm(v); })();
